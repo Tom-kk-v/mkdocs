@@ -9,7 +9,7 @@ import shutil
 import warnings
 from functools import cached_property
 from pathlib import PurePath
-from typing import IO, TYPE_CHECKING, Callable, Iterable, Iterator, Sequence
+from typing import IO, TYPE_CHECKING, Callable, Iterable, Iterator, Sequence, overload
 from urllib.parse import quote as urlquote
 
 import pathspec
@@ -101,6 +101,59 @@ class Files:
         """Remove file from Files collection."""
         self._src_uris = None
         self._files.remove(file)
+
+    @overload
+    def add_file(
+        self,
+        config: MkDocsConfig,
+        src_uri: str,
+        *,
+        src_dir: str,
+        dest_uri: str | None = None,
+        inclusion: InclusionLevel = InclusionLevel.UNDEFINED,
+        generated: bool = False,
+    ) -> File:
+        """Add a file entry originating from a physical location '{src_dir}/{path}'."""
+
+    @overload
+    def add_file(
+        self,
+        config: MkDocsConfig,
+        src_uri: str,
+        *,
+        content: IO,
+        dest_uri: str | None = None,
+        inclusion: InclusionLevel = InclusionLevel.UNDEFINED,
+        generated: bool = True,
+    ) -> File:
+        """Add a file entry with in-memory content."""
+
+    def add_file(
+        self,
+        config: MkDocsConfig,
+        src_uri: str,
+        *,
+        content: IO | None = None,
+        src_dir: str | None = None,
+        dest_uri: str | None = None,
+        inclusion: InclusionLevel = InclusionLevel.UNDEFINED,
+        generated: bool | None = None,
+    ) -> File:
+        if generated is None:
+            generated = src_dir is None
+        generated_by = config.plugins._current_plugin if generated else None
+        f = File(
+            src_uri,
+            src_dir=src_dir,
+            content=content,
+            dest_dir=config.site_dir,
+            use_directory_urls=config.use_directory_urls,
+            dest_uri=dest_uri,
+            inclusion=inclusion,
+            generated_by=generated_by,
+        )
+        self.append(f)
+        return f
 
     def copy_static_files(
         self,
