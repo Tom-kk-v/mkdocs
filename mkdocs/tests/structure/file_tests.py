@@ -1,3 +1,4 @@
+import io
 import os
 import sys
 import unittest
@@ -8,27 +9,6 @@ from mkdocs.tests.base import PathAssertionMixin, load_config, tempdir
 
 
 class TestFiles(PathAssertionMixin, unittest.TestCase):
-    def test_file_eq(self):
-        file = File('a.md', '/path/to/docs', '/path/to/site', use_directory_urls=False)
-        self.assertTrue(
-            file == File('a.md', '/path/to/docs', '/path/to/site', use_directory_urls=False)
-        )
-
-    def test_file_ne(self):
-        file = File('a.md', '/path/to/docs', '/path/to/site', use_directory_urls=False)
-        # Different filename
-        self.assertTrue(
-            file != File('b.md', '/path/to/docs', '/path/to/site', use_directory_urls=False)
-        )
-        # Different src_path
-        self.assertTrue(
-            file != File('a.md', '/path/to/other', '/path/to/site', use_directory_urls=False)
-        )
-        # Different URL
-        self.assertTrue(
-            file != File('a.md', '/path/to/docs', '/path/to/site', use_directory_urls=True)
-        )
-
     @unittest.skipUnless(sys.platform.startswith("win"), "requires Windows")
     def test_src_path_windows(self):
         f = File('foo\\a.md', '/path/to/docs', '/path/to/site', use_directory_urls=False)
@@ -269,6 +249,23 @@ class TestFiles(PathAssertionMixin, unittest.TestCase):
                 else:
                     self.assertEqual(f.url, 'stuff/1-foo/index.html')
                 self.assertEqual(f.name, 'foo')
+
+    def test_generated_file(self):
+        f = File(
+            'foo/bar.md',
+            src_dir=None,
+            dest_dir='/path/to/site',
+            use_directory_urls=False,
+            content=io.StringIO('вміст'),
+            generated_by='some-plugin',
+        )
+        self.assertEqual(f.src_uri, 'foo/bar.md')
+        self.assertIsNone(f.abs_src_path)
+        self.assertIsNone(f.src_dir)
+        self.assertEqual(f.dest_uri, 'foo/bar.html')
+        self.assertPathsEqual(f.abs_dest_path, '/path/to/site/foo/bar.html')
+        self.assertEqual(f.get_source(), 'вміст')
+        self.assertEqual(f.edit_uri, None)
 
     def test_files(self):
         fs = [

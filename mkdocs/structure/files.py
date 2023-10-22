@@ -9,7 +9,7 @@ import shutil
 import warnings
 from functools import cached_property
 from pathlib import PurePath
-from typing import TYPE_CHECKING, Callable, Iterable, Iterator, Sequence
+from typing import IO, TYPE_CHECKING, Callable, Iterable, Iterator, Sequence
 from urllib.parse import quote as urlquote
 
 import pathspec
@@ -165,27 +165,45 @@ class File:
     """
     A MkDocs File object.
 
-    Points to the source and destination locations of a file.
+    It represents how the contents of one file should be populated in the destination site.
 
-    The `path` argument must be a path that exists relative to `src_dir`.
+    A file always has its `abs_dest_path` (obtained by joining `dest_dir` and `dest_path`),
+    where the `dest_dir` is understood to be the *site* directory.
 
-    The `src_dir` and `dest_dir` must be absolute paths on the local file system.
+    *   A File entry *may* be backed by a physical source file at `abs_src_path` (obtained by
+        joining `src_dir` and `src_uri`). `src_dir` is understood to be the *docs* directory.
 
-    The `use_directory_urls` argument controls how destination paths are generated. If `False`, a Markdown file is
-    mapped to an HTML file of the same name (the file extension is changed to `.html`). If True, a Markdown file is
-    mapped to an HTML index file (`index.html`) nested in a directory using the "name" of the file in `path`. The
-    `use_directory_urls` argument has no effect on non-Markdown files.
+        Then `content` will remain `None`, and `get_content()`/`get_source()` will read the file
+        at `abs_src_path`.
 
-    File objects have the following properties, which are Unicode strings:
+    *   Since MkDocs 1.6 a file may alternatively be backed by an in-memory buffer - `content`.
+
+        Then `src_dir` and `abs_src_path` will remain `None`. `get_content()`/`get_source()` will
+        be backed directly by the `content` buffer.
+
+        But `src_uri` is still populated for such files! The virtual file pretends as if it
+        originated from that path in the `docs` directory, and other values will be derived.
+
+    For static files the file is just copied to the destination, and `dest_uri` equals `src_uri`.
+
+    For Markdown files (determined by the file extension in `src_uri`) the destination content
+    will be the rendered content, and `dest_uri` will have the `.html` extension and some
+    additional transformations to the path, based on `use_directory_urls`.
     """
 
     src_uri: str
     """The pure path (always '/'-separated) of the source file relative to the source directory."""
 
     use_directory_urls: bool
-    """Whether directory URLs ('foo/') should be used or not ('foo.html')."""
+    """Whether directory URLs ('foo/') should be used or not ('foo.html').
 
-    src_dir: str
+    If `False`, a Markdown file is mapped to an HTML file of the same name (the file extension is
+    changed to `.html`). If True, a Markdown file is mapped to an HTML index file (`index.html`)
+    nested in a directory using the "name" of the file in `path`. Non-Markdown files retain their
+    original path.
+    """
+
+    src_dir: str | None
     """The OS path of the source directory (top-level docs_dir) that the source file originates from."""
 
     dest_dir: str
@@ -198,6 +216,11 @@ class File:
     """If not None, indicates that a plugin generated this file on the fly.
 
     The value is the plugin's entrypoint name and can be used to find the plugin by key in the PluginCollection."""
+
+    content: IO | None = None
+    """If set, the file's content will be read from here.
+
+    This logic is handled by `get_content`, which should be used instead of accessing this attribute."""
 
     @property
     def src_path(self) -> str:
@@ -222,31 +245,27 @@ class File:
     def __init__(
         self,
         path: str,
-        src_dir: str,
+        src_dir: str | None,
         dest_dir: str,
         use_directory_urls: bool,
         *,
+        content: IO | None = None,
         dest_uri: str | None = None,
         inclusion: InclusionLevel = InclusionLevel.UNDEFINED,
         generated_by: str | None = None,
     ) -> None:
+        if (src_dir is None) == (content is None):
+            raise TypeError("File must have exactly one of 'src_dir' or 'content'")
         self.src_path = path
         self.src_dir = src_dir
         self.dest_dir = dest_dir
         self.use_directory_urls = use_directory_urls
+        self.content = content
         if dest_uri is not None:
             self.dest_uri = dest_uri
         self.inclusion = inclusion
         if generated_by is not None:
             self.generated_by = generated_by
-
-    def __eq__(self, other) -> bool:
-        return (
-            isinstance(other, self.__class__)
-            and self.src_uri == other.src_uri
-            and self.abs_src_path == other.abs_src_path
-            and self.url == other.url
-        )
 
     def __repr__(self):
         return (
@@ -300,8 +319,14 @@ class File:
     """The URI of the destination file relative to the destination directory as a string."""
 
     @cached_property
-    def abs_src_path(self) -> str:
-        """The absolute concrete path of the source file. Will use backslashes on Windows."""
+    def abs_src_path(self) -> str | None:
+        """
+        The absolute concrete path of the source file. Will use backslashes on Windows.
+
+        Note: do not use this path to read the file, instead use `get_content()`.
+        """
+        if self.src_dir is None:
+            return None
         return os.path.normpath(os.path.join(self.src_dir, self.src_uri))
 
     @cached_property
@@ -313,18 +338,56 @@ class File:
         """Return url for file relative to other file."""
         return utils.get_relative_url(self.url, other.url if isinstance(other, File) else other)
 
+    def get_content(self) -> IO:
+        """Get the content of this file as a read-only file-like object."""
+        if (content := self.content) is not None:
+            try:
+                content.seek(0)
+            except OSError:
+                pass
+            return content
+        else:
+            assert self.abs_src_path is not None
+            return open(self.abs_src_path, 'rb')
+
+    def get_source(self) -> str:
+        """Get the content of this file as a string. Assumes UTF-8 encoding."""
+        if self.content is not None:
+            with self.get_content() as f:
+                source = f.read()
+            if isinstance(source, bytes):
+                source = source.decode('utf-8-sig', errors='strict')
+            return source
+        else:
+            assert self.abs_src_path is not None
+            with open(self.abs_src_path, encoding='utf-8-sig', errors='strict') as f:
+                return f.read()
+
     def copy_file(self, dirty: bool = False) -> None:
         """Copy source file to destination, ensuring parent directories exist."""
         if dirty and not self.is_modified():
             log.debug(f"Skip copying unmodified file: '{self.src_uri}'")
         else:
             log.debug(f"Copying media file: '{self.src_uri}'")
+            self._copy_to(self.abs_dest_path)
+
+    def _copy_to(self, output_path: str) -> None:
+        output_path = self.abs_dest_path
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        if self.content is not None:
+            with self.get_content() as input_file, open(self.abs_dest_path, 'wb') as output_file:
+                shutil.copyfileobj(input_file, output_file)
+        else:
+            assert self.abs_src_path is not None
             try:
                 utils.copy_file(self.abs_src_path, self.abs_dest_path)
             except shutil.SameFileError:
                 pass  # Let plugins write directly into site_dir.
 
     def is_modified(self) -> bool:
+        if self.content is not None:
+            return True
+        assert self.abs_src_path is not None
         if os.path.isfile(self.abs_dest_path):
             return os.path.getmtime(self.abs_dest_path) < os.path.getmtime(self.abs_src_path)
         return True
